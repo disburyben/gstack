@@ -377,4 +377,31 @@ describe('Server auth security', () => {
     expect(routeSrc).toContain('HttpOnly');
     expect(routeSrc).toContain('SameSite=Strict');
   });
+
+  // Root-token comparison must be constant-time. A `===` on the bearer token
+  // leaks it byte-by-byte to any caller that can time responses.
+  test('root auth compares tokens in constant time', () => {
+    const validateAuthBlock = sliceBetween(SERVER_SRC, 'function validateAuth(req: Request)', '\n  }');
+    expect(validateAuthBlock).toContain('timingSafeEqualStr');
+    expect(validateAuthBlock).not.toContain('=== `Bearer');
+
+    expect(SERVER_SRC).toContain('crypto.timingSafeEqual(Buffer.from(a');
+
+    const disposeBlock = sliceBetween(SERVER_SRC, "url.pathname === '/pty-dispose'", '/internal/lease-refresh');
+    expect(disposeBlock).toContain('timingSafeEqualStr');
+    expect(disposeBlock).not.toContain('=== authToken');
+  });
+
+  // GET /file serves attacker-influenced downloads. HTML/SVG must never render
+  // inline on the daemon origin — the SSE/PTY cookies are Path=/, so an inline
+  // page could read authenticated endpoints same-origin.
+  test('/file never renders active content inline', () => {
+    const fileBlock = sliceBetween(SERVER_SRC, "url.pathname === '/file'", 'Command endpoint');
+    expect(fileBlock).toContain('isActiveContent');
+    expect(fileBlock).toContain("'attachment'");
+    expect(fileBlock).toContain('X-Content-Type-Options');
+    expect(fileBlock).toContain('Content-Security-Policy');
+    // Filename must be escaped before it lands in the header value
+    expect(fileBlock).not.toContain('filename="${path.basename(filePath)}"');
+  });
 });
