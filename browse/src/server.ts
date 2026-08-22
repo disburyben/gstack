@@ -466,6 +466,20 @@ async function restartPtySession(sessionId: string): Promise<boolean> {
   } catch { return false; }
 }
 
+/**
+ * Constant-time string comparison for bearer tokens. Plain `===` short-circuits
+ * on the first differing byte, which leaks the token byte-by-byte to a caller
+ * that can time responses (the daemon is reachable by any local process, and
+ * the tunnel surface shares this handler).
+ */
+function timingSafeEqualStr(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  // timingSafeEqual throws on length mismatch; compare UTF-8 byte lengths so a
+  // multibyte input can never reach it with mismatched buffers.
+  if (Buffer.byteLength(a, 'utf8') !== Buffer.byteLength(b, 'utf8')) return false;
+  return crypto.timingSafeEqual(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
+}
+
 /** Extract bearer token from request. Returns the token string or null. */
 function extractToken(req: Request): string | null {
   const header = req.headers.get('authorization');
@@ -1573,7 +1587,8 @@ export function buildFetchHandler(cfg: ServerConfig): ServerHandle {
   // validateAuth was deleted in v1.35.0.0.
   function validateAuth(req: Request): boolean {
     const header = req.headers.get('authorization');
-    return header === `Bearer ${authToken}`;
+    if (!header?.startsWith('Bearer ')) return false;
+    return timingSafeEqualStr(header.slice(7), authToken);
   }
 
   // Factory-scoped shutdown. Closes the cfg-provided browserManager so
@@ -1975,8 +1990,8 @@ export function buildFetchHandler(cfg: ServerConfig): ServerHandle {
         // Accept either header bearer OR body authToken. Both must match
         // the root auth token; otherwise reject.
         const headerToken = extractToken(req);
-        const authedByHeader = headerToken !== null && headerToken === authToken;
-        const authedByBody = authTokenFromBody !== null && authTokenFromBody === authToken;
+        const authedByHeader = headerToken !== null && timingSafeEqualStr(headerToken, authToken);
+        const authedByBody = authTokenFromBody !== null && timingSafeEqualStr(authTokenFromBody, authToken);
         if (!authedByHeader && !authedByBody) {
           return new Response(JSON.stringify({ error: 'Unauthorized' }), {
             status: 401, headers: { 'Content-Type': 'application/json' },
@@ -2655,13 +2670,24 @@ export function buildFetchHandler(cfg: ServerConfig): ServerHandle {
           '.html': 'text/html', '.txt': 'text/plain', '.mhtml': 'message/rfc822',
         };
         const contentType = MIME_MAP[ext] || 'application/octet-stream';
+        // Active content (HTML, SVG) must never render inline: this origin also
+        // serves the authenticated daemon endpoints, and the SSE/PTY session
+        // cookies are Path=/ — an attacker-supplied download rendered here could
+        // read /activity/stream or /memory same-origin and exfiltrate them.
+        const isActiveContent = contentType === 'text/html' || contentType === 'image/svg+xml';
+        const disposition = isActiveContent ? 'attachment' : 'inline';
+        // Quote-escape the filename: a name containing `"` or CR/LF would
+        // otherwise break out of the header value.
+        const safeName = path.basename(filePath).replace(/[\r\n"\\]/g, '_');
         resetIdleTimer();
         return new Response(Bun.file(filePath), {
           headers: {
             'Content-Type': contentType,
             'Content-Length': String(stat.size),
-            'Content-Disposition': `inline; filename="${path.basename(filePath)}"`,
+            'Content-Disposition': `${disposition}; filename="${safeName}"`,
             'Cache-Control': 'no-cache',
+            'X-Content-Type-Options': 'nosniff',
+            'Content-Security-Policy': "sandbox; default-src 'none'",
           },
         });
       }

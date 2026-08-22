@@ -18,9 +18,14 @@ Deno.serve(async (req) => {
       return new Response(CURRENT_VERSION, { status: 200 });
     }
 
+    // Anon key, not the service role key: this endpoint is unauthenticated and
+    // only needs the INSERT that update_checks' RLS policy already grants. The
+    // service role key bypasses RLS entirely — full read/write on every
+    // telemetry table — which a public ping endpoint has no need for.
+    // Same rationale as telemetry-ingest.
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL") ?? "",
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""
+      Deno.env.get("SUPABASE_ANON_KEY") ?? ""
     );
 
     // Log the update check (fire-and-forget)

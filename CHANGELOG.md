@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.61.0.1] - 2026-08-10
+
+**Security audit fixes.**
+
+- **Root auth token compared in constant time.** `validateAuth()` and `/pty-dispose` used `===` on the bearer token, which short-circuits on the first differing byte and leaks the token to a caller that can time responses. Both now go through `timingSafeEqualStr()`, matching `isRootToken()` in the token registry.
+- **`GET /file` no longer renders HTML/SVG inline.** Downloaded active content was served as `inline` on the daemon origin, where the SSE and PTY session cookies are `Path=/` — a malicious download could read `/activity/stream` or `/memory` same-origin. HTML/SVG now come back as `attachment` with `X-Content-Type-Options: nosniff` and a sandbox CSP, and the `Content-Disposition` filename is escaped.
+- **`update-check` edge function dropped from service role to anon key.** The public unauthenticated ping endpoint only needs the INSERT that `update_checks`' RLS policy already grants; the service role key bypasses RLS on every telemetry table. Same rationale as `telemetry-ingest`.
+- **`diff` bumped 7.0.0 → ^8.0.4** (GHSA-73rr-hh4g-fpgx: DoS in `parsePatch`/`applyPatch`).
+
 ## [1.61.0.0] - 2026-07-09
 
 ## **Nine guard bugs fixed in one wave.**
