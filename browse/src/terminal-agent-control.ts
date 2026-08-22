@@ -18,6 +18,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { safeUnlink, safeKill, isProcessAlive } from './error-handling';
 import { writeSecureFile, mkdirSecure } from './file-permissions';
+import { openServerLog, closeServerLog, serverLogPath } from './server-log';
 
 /**
  * Locate the terminal-agent script on disk. In dev (cli.ts running via
@@ -68,6 +69,9 @@ export function spawnTerminalAgent(opts: {
   }
   const script = opts.scriptPath || resolveTerminalAgentScript();
   if (!script || !fs.existsSync(script)) return null;
+  // Same reasoning as the server spawn in cli.ts: detached means nobody is
+  // reading the agent's stderr, so point it at the shared server log.
+  const logFd = openServerLog(serverLogPath(stateDir));
   const proc = (Bun as any).spawn(['bun', 'run', script], {
     cwd: opts.cwd || process.cwd(),
     env: {
@@ -76,8 +80,9 @@ export function spawnTerminalAgent(opts: {
       BROWSE_SERVER_PORT: String(opts.serverPort),
       ...(opts.extraEnv || {}),
     },
-    stdio: ['ignore', 'ignore', 'ignore'],
+    stdio: ['ignore', logFd ?? 'ignore', logFd ?? 'ignore'],
   });
+  closeServerLog(logFd);
   proc.unref?.();
   return proc.pid ?? null;
 }
