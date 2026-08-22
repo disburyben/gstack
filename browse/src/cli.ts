@@ -18,6 +18,7 @@ import { resolveConfig, ensureStateDir, readVersionHash } from './config';
 import { parseProxyConfig, computeConfigHash, ProxyConfigError } from './proxy-config';
 import { redactProxyUrl } from './proxy-redact';
 import { spawnTerminalAgent } from './terminal-agent-control';
+import { openServerLog, closeServerLog, rotateServerLog, serverLogEnabled } from './server-log';
 
 const config = resolveConfig();
 const IS_WINDOWS = process.platform === 'win32';
@@ -314,16 +315,25 @@ async function startServer(extraEnv?: Record<string, string>): Promise<ServerSta
   // server's own parseInt at server.ts:760.
   const parentPid = parseInt(process.env.BROWSE_PARENT_PID || '', 10) === 0 ? '0' : String(process.pid);
 
+  // Give the detached server somewhere to write its diagnostics. Without this
+  // every warning it emits goes to /dev/null and a degraded daemon looks
+  // healthy from the CLI side.
   if (IS_WINDOWS && NODE_SERVER_SCRIPT) {
     // Windows: Bun.spawn() + proc.unref() doesn't truly detach on Windows —
     // when the CLI exits, the server dies with it. Use Node's child_process.spawn
     // with { detached: true } instead, which is the gold standard for Windows
     // process independence. Credit: PR #191 by @fqueiro.
     const extraEnvStr = JSON.stringify({ BROWSE_STATE_FILE: config.stateFile, BROWSE_PARENT_PID: parentPid, ...(extraEnv || {}) });
+    // The launcher is a separate process, so our fd numbers mean nothing to it —
+    // it opens the log itself (rotation still happens here, in the CLI).
+    if (serverLogEnabled()) rotateServerLog(config.serverLog);
+    const logPathStr = serverLogEnabled() ? JSON.stringify(config.serverLog) : 'null';
     const launcherCode =
-      `const{spawn}=require('child_process');` +
+      `const{spawn}=require('child_process');const fs=require('fs');` +
+      `const p=${logPathStr};let out='ignore';` +
+      `if(p){try{out=fs.openSync(p,'a',0o600)}catch(e){out='ignore'}}` +
       `spawn(process.execPath,[${JSON.stringify(NODE_SERVER_SCRIPT)}],` +
-      `{detached:true,stdio:['ignore','ignore','ignore'],env:Object.assign({},process.env,` +
+      `{detached:true,stdio:['ignore',out,out],env:Object.assign({},process.env,` +
       `${extraEnvStr})}).unref()`;
     Bun.spawnSync(['node', '-e', launcherCode], { stdio: ['ignore', 'ignore', 'ignore'] });
   } else {
@@ -338,11 +348,14 @@ async function startServer(extraEnv?: Record<string, string>): Promise<ServerSta
     // which calls setsid() so the server becomes its own session leader
     // (PPID=1, STAT=Ss) and survives the spawning shell's exit. Mirrors
     // the Windows path's rationale — same root cause, different OS API.
+    const logFd = openServerLog(config.serverLog);
     nodeSpawn('bun', ['run', SERVER_SCRIPT], {
       detached: true,
-      stdio: ['ignore', 'ignore', 'ignore'],
+      stdio: ['ignore', logFd ?? 'ignore', logFd ?? 'ignore'],
       env: { ...process.env, BROWSE_STATE_FILE: config.stateFile, BROWSE_PARENT_PID: parentPid, ...extraEnv },
     }).unref();
+    // The child inherited its own copy; the CLI must not hold the fd open.
+    closeServerLog(logFd);
   }
 
   // Wait for server to become healthy.
@@ -369,7 +382,10 @@ async function startServer(extraEnv?: Record<string, string>): Promise<ServerSta
   } catch (e: any) {
     if (e.code !== 'ENOENT') throw e;
   }
-  throw new Error(`Server failed to start within ${MAX_START_WAIT / 1000}s`);
+  throw new Error(
+    `Server failed to start within ${MAX_START_WAIT / 1000}s` +
+    (serverLogEnabled() ? ` — see ${config.serverLog}` : '')
+  );
 }
 
 /**

@@ -15,6 +15,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { mkdirSecure } from './file-permissions';
 import { safeUnlinkQuiet } from './error-handling';
+import { serverLogPath } from './server-log';
 
 export interface BrowseConfig {
   projectDir: string;
@@ -24,6 +25,8 @@ export interface BrowseConfig {
   networkLog: string;
   dialogLog: string;
   auditLog: string;
+  /** stdout+stderr of the detached server and terminal-agent. */
+  serverLog: string;
 }
 
 /**
@@ -75,6 +78,7 @@ export function resolveConfig(
     networkLog: path.join(stateDir, 'browse-network.log'),
     dialogLog: path.join(stateDir, 'browse-dialog.log'),
     auditLog: path.join(stateDir, 'browse-audit.jsonl'),
+    serverLog: serverLogPath(stateDir),
   };
 }
 
@@ -106,9 +110,8 @@ export function ensureStateDir(config: BrowseConfig): void {
   } catch (err: any) {
     if (err.code !== 'ENOENT') {
       // Write warning to server log (visible even in daemon mode)
-      const logPath = path.join(config.stateDir, 'browse-server.log');
       try {
-        fs.appendFileSync(logPath, `[${new Date().toISOString()}] Warning: could not update .gitignore at ${gitignorePath}: ${err.message}\n`);
+        fs.appendFileSync(config.serverLog, `[${new Date().toISOString()}] Warning: could not update .gitignore at ${gitignorePath}: ${err.message}\n`);
       } catch {
         // stateDir write failed too — nothing more we can do
       }
